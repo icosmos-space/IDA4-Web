@@ -3,8 +3,7 @@ dist/
 .DS_Store
 *.local
 .vite/
-public/ort/
-public/models/*.onnx
 .playwright-cli/
 testdata/smoke.png
+
 
