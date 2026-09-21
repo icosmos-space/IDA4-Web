@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import type { GenerateOptions, Side } from '../lib/types'
 import { defaultOptions } from '../lib/types'
-import { DOCUMENT_NAME, effectsHint, formatDuration, isImageFile, readFilePreview } from '../lib/utils'
+import { DOCUMENT_NAME, formatDuration, isImageFile, readFilePreview } from '../lib/utils'
 import { generateIDCardPdf } from '../lib/generate'
 import { downloadBlob, tryShareFiles } from '../lib/pdf'
 import { loadCardCorrectionSession } from '../lib/ort'
@@ -19,22 +19,27 @@ const frontPreview = ref('')
 const backPreview = ref('')
 const pdfBlob = ref<Blob | null>(null)
 const engineUsed = ref('')
-const lastMs = ref(0)
 
 const modelLoading = ref(true)
 const modelReady = ref(false)
-const modelError = ref('')
 
 const modalVisible = computed(() => modelLoading.value || busy.value)
 const modalTitle = computed(() => {
-  if (modelLoading.value) return '正在加载模型'
+  if (modelLoading.value) return '正在准备本地引擎'
   return busy.value ? '正在生成' : ''
 })
 const modalText = computed(() => {
   if (modelLoading.value) {
-    return status.value || '首次加载约 40MB，请稍候…'
+    return status.value || '首次启动需加载视觉模型，仅存于本机'
   }
-  return status.value || '处理中…'
+  return status.value || '计算在本机完成，请稍候'
+})
+
+const runtimeState = computed(() => {
+  if (modelLoading.value) return { tone: 'load' as const, label: '引擎启动中' }
+  if (data.opts.engine === 'native') return { tone: 'ok' as const, label: '边缘引擎' }
+  if (modelReady.value) return { tone: 'ok' as const, label: '智能矫正' }
+  return { tone: 'warn' as const, label: '引擎未就绪' }
 })
 
 const cameraInputs = {
@@ -65,18 +70,29 @@ const canGenerate = computed(() => {
   return true
 })
 
-const engineLabel = computed(() => (data.opts.engine === 'card_correction' ? '票证矫正（ONNX）' : '纯边缘检测'))
+const engineLabel = computed(() =>
+  data.opts.engine === 'card_correction' ? '智能矫正' : '边缘检测',
+)
+
+const previewTag = computed(() => {
+  if (!engineUsed.value) return '待生成'
+  return engineUsed.value === 'card_correction' ? '智能矫正' : '边缘检测'
+})
 
 function sideState(side: Side): SideState {
   return side === 'front' ? data.front : data.back
 }
 
-function sideTitle(side: Side): string {
-  return side === 'front' ? '国徽面' : '人像面'
-}
-
 function toggleFold(key: 'effects' | 'watermark') {
   openFold.value = openFold.value === key ? null : key
+}
+
+function sanitize(msg: string): string {
+  return msg
+    .replace(/ONNX/gi, '本地引擎')
+    .replace(/cv_resnet18\S*/gi, '智能矫正')
+    .replace(/card_correction/gi, '智能矫正')
+    .replace(/模型下载失败[^，。]*/g, '本地引擎加载失败')
 }
 
 function clearOutput() {
@@ -96,7 +112,7 @@ function clearSide(side: Side, event?: Event) {
   t.preview = ''
   t.name = ''
   clearOutput()
-  status.value = `${sideTitle(side)}已清除`
+  status.value = side === 'front' ? '左侧已清除' : '右侧已清除'
 }
 
 async function applyFile(side: Side, file: File | null | undefined) {
@@ -111,7 +127,7 @@ async function applyFile(side: Side, file: File | null | undefined) {
   t.name = file.name
   t.preview = await readFilePreview(file)
   clearOutput()
-  status.value = `${sideTitle(side)}已选择`
+  status.value = `${readyCount.value}/2 已就绪`
 }
 
 function openPicker(side: Side, mode: 'camera' | 'gallery') {
@@ -119,19 +135,18 @@ function openPicker(side: Side, mode: 'camera' | 'gallery') {
   input?.click()
 }
 
-function onPick(side: Side, mode: 'camera' | 'gallery', event: Event) {
+function onPick(side: Side, event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   void applyFile(side, file)
   input.value = ''
-  void mode
 }
 
 async function generate() {
   if (!canGenerate.value) return
   busy.value = true
   error.value = ''
-  status.value = '准备中…'
+  status.value = '本地计算中…'
   progress.value = 0
   clearOutput()
   try {
@@ -140,24 +155,20 @@ async function generate() {
       data.back.file!,
       { ...data.opts },
       (msg, ratio) => {
-        status.value = msg
+        status.value = sanitize(msg)
         progress.value = ratio
       },
     )
-    sheetUrl.value = URL.createObjectURL(
-      await new Promise<Blob>((resolve, reject) => {
-        result.sheet.toBlob((b) => (b ? resolve(b) : reject(new Error('sheet encode failed'))), 'image/jpeg', 0.92)
-      }),
-    )
+    sheetUrl.value = result.sheetPreviewUrl
     frontPreview.value = result.frontPreview
     backPreview.value = result.backPreview
     pdfBlob.value = result.pdfBlob
     engineUsed.value = result.engineUsed
-    lastMs.value = result.durationMs
     progress.value = 1
-    status.value = `生成完成 · ${formatDuration(result.durationMs)}${result.warnings.length ? ' · ' + result.warnings[0] : ''}`
+    const warn = result.warnings.length ? ` · ${sanitize(result.warnings[0])}` : ''
+    status.value = `生成完成 · ${formatDuration(result.durationMs)}${warn}`
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err)
+    error.value = sanitize(err instanceof Error ? err.message : String(err))
     status.value = '生成失败'
   } finally {
     busy.value = false
@@ -170,9 +181,9 @@ async function download() {
   const shared = await tryShareFiles(file, '身份证复印件', DOCUMENT_NAME)
   if (!shared) {
     downloadBlob(pdfBlob.value, '身份证复印件.pdf')
-    status.value = 'PDF 已下载'
+    status.value = 'PDF 已保存'
   } else {
-    status.value = '已打开系统分享'
+    status.value = '已打开分享'
   }
 }
 
@@ -180,26 +191,22 @@ function printPdf() {
   if (!pdfBlob.value) return
   const url = URL.createObjectURL(pdfBlob.value)
   const w = window.open(url, '_blank')
-  if (!w) {
-    error.value = '请允许弹出窗口以打印，或先下载 PDF'
-  }
+  if (!w) error.value = '请允许弹出窗口，或先下载 PDF'
   setTimeout(() => URL.revokeObjectURL(url), 60000)
 }
 
 async function preloadModel() {
   modelLoading.value = true
   modelReady.value = false
-  modelError.value = ''
-  status.value = '正在下载并初始化 ONNX 模型…'
+  status.value = '正在加载本地视觉引擎…'
   try {
     await loadCardCorrectionSession()
     modelReady.value = true
-    status.value = '模型已就绪'
+    status.value = '本地引擎已就绪'
   } catch (err) {
-    modelError.value = err instanceof Error ? err.message : String(err)
     modelReady.value = false
-    error.value = `模型加载失败：${modelError.value}`
-    status.value = '模型加载失败，可改用边缘检测'
+    error.value = sanitize(err instanceof Error ? err.message : String(err))
+    status.value = '智能引擎暂不可用，可改用边缘检测'
   } finally {
     modelLoading.value = false
   }
@@ -214,177 +221,168 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page" :class="{ ready: mounted }">
-    <header class="top anim" style="--i: 0">
+  <div class="app" :class="{ ready: mounted }">
+    <header class="topbar">
       <div class="brand">
-        <div class="logo">ID</div>
-        <div>
-          <h1>IDA4 Web</h1>
-          <p>身份证 A4 复印件 · 浏览器 ONNX</p>
+        <div class="mark">ID</div>
+        <div class="brand-text">
+          <strong>IDA4</strong>
+          <span>{{ DOCUMENT_NAME }}</span>
         </div>
       </div>
-      <div class="doc-name">{{ DOCUMENT_NAME }}</div>
+      <div class="top-meta">
+        <span class="pill">
+          <i class="pulse" :class="runtimeState.tone" />
+          {{ runtimeState.label }}
+        </span>
+        <span class="pill hide-sm">本地计算</span>
+        <span class="pill hide-sm">数据不出设备</span>
+        <span class="pill hide-sm mono">{{ engineLabel }}</span>
+      </div>
     </header>
 
-    <section class="slots anim" style="--i: 1">
-      <article
-        v-for="(side, index) in (['front', 'back'] as Side[])"
-        :key="side"
-        class="slot"
-        :class="{ filled: !!sideState(side).preview }"
-      >
-        <div class="slot-head">
-          <strong>{{ sideTitle(side) }}</strong>
-          <button v-if="sideState(side).preview" type="button" class="icon-btn" @click="clearSide(side, $event)">
-            清除
+    <div class="main">
+      <aside class="pane left">
+        <div class="slots">
+          <article
+            v-for="side in (['front', 'back'] as Side[])"
+            :key="side"
+            class="slot"
+            :class="{ filled: !!sideState(side).preview }"
+          >
+            <button type="button" class="slot-hit" @click="openPicker(side, 'gallery')">
+              <img v-if="sideState(side).preview" :src="sideState(side).preview" alt="" />
+              <span v-else class="plus" aria-hidden="true">+</span>
+            </button>
+            <div class="slot-tools">
+              <button type="button" class="icon-btn" title="相机" @click="openPicker(side, 'camera')">◎</button>
+              <button
+                v-if="sideState(side).preview"
+                type="button"
+                class="icon-btn danger"
+                title="清除"
+                @click="clearSide(side, $event)"
+              >
+                ×
+              </button>
+            </div>
+            <input
+              :ref="(el) => { cameraInputs[side].value = el as HTMLInputElement | null }"
+              class="hidden"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              @change="onPick(side, $event)"
+            />
+            <input
+              :ref="(el) => { galleryInputs[side].value = el as HTMLInputElement | null }"
+              class="hidden"
+              type="file"
+              accept="image/*"
+              @change="onPick(side, $event)"
+            />
+          </article>
+        </div>
+
+        <label class="field">
+          <span class="field-label">引擎</span>
+          <select v-model="data.opts.engine" class="select">
+            <option value="card_correction">智能矫正</option>
+            <option value="native">边缘检测</option>
+          </select>
+        </label>
+
+        <div class="fold">
+          <button type="button" class="fold-head" @click="toggleFold('effects')">
+            <span>效果</span>
+            <span class="muted mono">{{ openFold === 'effects' ? '−' : '+' }}</span>
           </button>
-        </div>
-        <button type="button" class="slot-body" @click="openPicker(side, 'gallery')">
-          <img v-if="sideState(side).preview" :src="sideState(side).preview" :alt="sideTitle(side)" />
-          <div v-else class="empty">
-            <span class="empty-icon">📷</span>
-            <span>点击选择照片</span>
-          </div>
-        </button>
-        <div class="slot-actions">
-          <button type="button" class="btn secondary" @click="openPicker(side, 'camera')">拍照</button>
-          <button type="button" class="btn secondary" @click="openPicker(side, 'gallery')">相册</button>
-        </div>
-        <input
-          :ref="(el) => { cameraInputs[side].value = el as HTMLInputElement | null }"
-          class="hidden"
-          type="file"
-          accept="image/*"
-          capture="environment"
-          @change="onPick(side, 'camera', $event)"
-        />
-        <input
-          :ref="(el) => { galleryInputs[side].value = el as HTMLInputElement | null }"
-          class="hidden"
-          type="file"
-          accept="image/*"
-          @change="onPick(side, 'gallery', $event)"
-        />
-        <span class="slot-index">{{ index + 1 }}</span>
-      </article>
-    </section>
-
-    <section class="panel anim" style="--i: 2">
-      <div class="engine-row">
-        <span class="label">检测引擎</span>
-        <select v-model="data.opts.engine" class="select">
-          <option value="card_correction">票证矫正（ONNX）</option>
-          <option value="native">纯边缘检测</option>
-        </select>
-      </div>
-
-      <div class="fold" :class="{ open: openFold === 'effects' }">
-        <button type="button" class="fold-head" @click="toggleFold('effects')">
-          <span>效果</span>
-          <span class="hint mono">{{ effectsHint(data.opts) }}</span>
-        </button>
-        <div v-show="openFold === 'effects'" class="fold-body">
-          <label class="check"><input v-model="data.opts.enhance" type="checkbox" />图像增强</label>
-          <label class="check"><input v-model="data.opts.allowFallback" type="checkbox" />失败降级</label>
-          <label class="check"><input v-model="data.opts.randomTilt" type="checkbox" />随机倾斜</label>
-          <label class="check"><input v-model="data.opts.photocopyLook" type="checkbox" />圆角黑边</label>
-          <label class="check"><input v-model="data.opts.grayscale" type="checkbox" />黑白化</label>
-        </div>
-      </div>
-
-      <div class="fold" :class="{ open: openFold === 'watermark' }">
-        <button type="button" class="fold-head" @click="toggleFold('watermark')">
-          <span>水印</span>
-          <span class="hint mono">{{ data.opts.watermarkEnabled ? '开' : '关' }}</span>
-        </button>
-        <div v-show="openFold === 'watermark'" class="fold-body">
-          <label class="check"><input v-model="data.opts.watermarkEnabled" type="checkbox" />开启水印</label>
-          <input
-            v-model="data.opts.watermarkText"
-            class="text-input"
-            maxlength="32"
-            placeholder="例如：仅供办理业务使用"
-            :disabled="!data.opts.watermarkEnabled"
-          />
-          <div class="slider-row">
-            <div class="slider-head"><span>字号</span><span class="mono">{{ data.opts.watermarkFontSize }}</span></div>
-            <input v-model.number="data.opts.watermarkFontSize" type="range" min="16" max="72" step="1" :disabled="!data.opts.watermarkEnabled" />
-          </div>
-          <div class="slider-row">
-            <div class="slider-head"><span>角度</span><span class="mono">{{ data.opts.watermarkAngle }}°</span></div>
-            <input v-model.number="data.opts.watermarkAngle" type="range" min="-60" max="60" step="1" :disabled="!data.opts.watermarkEnabled" />
-          </div>
-          <div class="slider-row">
-            <div class="slider-head"><span>字间距</span><span class="mono">{{ data.opts.watermarkLetterSpacing }}</span></div>
-            <input v-model.number="data.opts.watermarkLetterSpacing" type="range" min="0" max="40" step="1" :disabled="!data.opts.watermarkEnabled" />
-          </div>
-          <div class="slider-row">
-            <div class="slider-head"><span>行间距</span><span class="mono">{{ data.opts.watermarkLineSpacing }}</span></div>
-            <input v-model.number="data.opts.watermarkLineSpacing" type="range" min="40" max="220" step="2" :disabled="!data.opts.watermarkEnabled" />
+          <div v-show="openFold === 'effects'" class="fold-body">
+            <label class="check"><input v-model="data.opts.enhance" type="checkbox" /><span>增强</span></label>
+            <label class="check"><input v-model="data.opts.allowFallback" type="checkbox" /><span>降级</span></label>
+            <label class="check"><input v-model="data.opts.randomTilt" type="checkbox" /><span>倾斜</span></label>
+            <label class="check"><input v-model="data.opts.photocopyLook" type="checkbox" /><span>黑边</span></label>
+            <label class="check"><input v-model="data.opts.grayscale" type="checkbox" /><span>黑白</span></label>
           </div>
         </div>
-      </div>
-    </section>
 
-    <section class="preview anim" style="--i: 3">
-      <div class="preview-head">
-        <strong>A4 预览</strong>
-        <span class="mono tag">{{ engineUsed || engineLabel }}</span>
-      </div>
-      <div class="preview-frame" :class="{ empty: !sheetUrl }">
-        <img v-if="sheetUrl" :src="sheetUrl" alt="A4 复印件预览" />
-        <div v-else class="empty">
-          <span>导入两面照片后生成</span>
-          <span class="sub">确认无误再下载 PDF</span>
+        <div class="fold">
+          <button type="button" class="fold-head" @click="toggleFold('watermark')">
+            <span>水印</span>
+            <span class="muted mono">{{ data.opts.watermarkEnabled ? '开' : '关' }}</span>
+          </button>
+          <div v-show="openFold === 'watermark'" class="fold-body">
+            <label class="check"><input v-model="data.opts.watermarkEnabled" type="checkbox" /><span>启用</span></label>
+            <input
+              v-model="data.opts.watermarkText"
+              class="text-input"
+              maxlength="32"
+              placeholder="水印文字"
+              :disabled="!data.opts.watermarkEnabled"
+            />
+            <div class="slider">
+              <div class="slider-head"><span>字号</span><span class="mono">{{ data.opts.watermarkFontSize }}</span></div>
+              <input v-model.number="data.opts.watermarkFontSize" type="range" min="16" max="72" :disabled="!data.opts.watermarkEnabled" />
+            </div>
+            <div class="slider">
+              <div class="slider-head"><span>角度</span><span class="mono">{{ data.opts.watermarkAngle }}°</span></div>
+              <input v-model.number="data.opts.watermarkAngle" type="range" min="-60" max="60" :disabled="!data.opts.watermarkEnabled" />
+            </div>
+            <div class="slider">
+              <div class="slider-head"><span>字距</span><span class="mono">{{ data.opts.watermarkLetterSpacing }}</span></div>
+              <input v-model.number="data.opts.watermarkLetterSpacing" type="range" min="0" max="40" :disabled="!data.opts.watermarkEnabled" />
+            </div>
+            <div class="slider">
+              <div class="slider-head"><span>行距</span><span class="mono">{{ data.opts.watermarkLineSpacing }}</span></div>
+              <input v-model.number="data.opts.watermarkLineSpacing" type="range" min="40" max="220" step="2" :disabled="!data.opts.watermarkEnabled" />
+            </div>
+          </div>
         </div>
-      </div>
-      <div v-if="frontPreview || backPreview" class="card-previews">
-        <figure v-if="frontPreview">
-          <img :src="frontPreview" alt="国徽面矫正" />
-          <figcaption>国徽面</figcaption>
-        </figure>
-        <figure v-if="backPreview">
-          <img :src="backPreview" alt="人像面矫正" />
-          <figcaption>人像面</figcaption>
-        </figure>
-      </div>
-    </section>
 
-    <footer class="bottom anim" style="--i: 4">
-      <div class="status-line">
-        <span>
-          {{
-            status ||
-            (modelLoading
-              ? '正在加载模型…'
-              : `已准备 ${readyCount}/2 · 引擎 ${engineLabel}${data.opts.engine === 'card_correction' && !modelReady ? ' · 模型未就绪' : ''}`)
-          }}
-        </span>
-        <span v-if="busy || modelLoading" class="mono">
-          {{ modelLoading && !busy ? '' : `${Math.round(progress * 100)}%` }}
-        </span>
-      </div>
-      <div v-if="busy || modelLoading" class="progress">
-        <i :style="{ width: modelLoading && !busy ? '100%' : `${Math.round(progress * 100)}%` }" />
-      </div>
-      <div v-if="error" class="error">{{ error }}</div>
-      <div class="actions">
-        <button type="button" class="btn primary" :disabled="!canGenerate" @click="generate">
-          {{ busy ? '处理中…' : modelLoading ? '模型加载中…' : '生成' }}
-        </button>
-        <button type="button" class="btn" :disabled="!pdfBlob" @click="download">下载 / 分享</button>
-        <button type="button" class="btn ghost" :disabled="!pdfBlob" @click="printPdf">打印</button>
-      </div>
-    </footer>
+        <div class="dock">
+          <div class="status">
+            <span class="status-line">
+              {{ status || (modelLoading ? '准备引擎…' : `${readyCount}/2 · ${engineLabel}`) }}
+            </span>
+            <span v-if="busy" class="mono">{{ Math.round(progress * 100) }}%</span>
+          </div>
+          <div v-if="error" class="error">{{ error }}</div>
+          <div class="actions">
+            <button type="button" class="btn primary" :disabled="!canGenerate" @click="generate">
+              {{ busy ? '生成中…' : modelLoading ? '准备中…' : '生成' }}
+            </button>
+            <button type="button" class="btn" :disabled="!pdfBlob" @click="download">下载</button>
+            <button type="button" class="btn quiet" :disabled="!pdfBlob" @click="printPdf">打印</button>
+          </div>
+        </div>
+      </aside>
 
-    <!-- 居中模态 loading：打开页面加载模型 / 生成中 -->
-    <div v-if="modalVisible" class="modal-mask" role="status" aria-live="polite">
-      <div class="modal-card">
-        <div class="spinner" aria-hidden="true" />
+      <section class="pane right">
+        <div class="preview-head">
+          <h2>A4 预览</h2>
+          <span class="badge">{{ previewTag }}</span>
+        </div>
+        <div class="preview-frame stage" :class="{ empty: !sheetUrl }">
+          <img v-if="sheetUrl" :src="sheetUrl" alt="A4" />
+          <div v-else class="stage-empty">
+            <div class="stage-ring" />
+            <p class="status-line">{{ readyCount < 2 ? `${readyCount}/2` : '就绪' }}</p>
+          </div>
+        </div>
+        <div v-if="frontPreview || backPreview" class="card-previews thumbs">
+          <figure v-if="frontPreview"><img :src="frontPreview" alt="" /></figure>
+          <figure v-if="backPreview"><img :src="backPreview" alt="" /></figure>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="modalVisible" class="modal-mask mask" role="status" aria-live="polite">
+      <div class="modal">
+        <div class="orb" aria-hidden="true"><span /></div>
         <div class="modal-title">{{ modalTitle }}</div>
         <div class="modal-text">{{ modalText }}</div>
         <div v-if="busy" class="modal-pct mono">{{ Math.round(progress * 100) }}%</div>
-        <div v-if="busy" class="progress modal-progress">
+        <div v-if="busy" class="progress modal-bar">
           <i :style="{ width: `${Math.round(progress * 100)}%` }" />
         </div>
       </div>
@@ -393,219 +391,288 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.page {
-  --bg: #161616;
-  --surface: #222;
-  --surface-2: #2a2a2a;
-  --ink: #fff;
-  --muted: #9a9a9a;
-  --line: #3a3a3a;
-  --accent: #00a8e0;
-  --danger: #cc0000;
-  min-height: 100dvh;
-  padding: 12px 12px calc(96px + env(safe-area-inset-bottom));
+.app {
+  --bg: #09090b;
+  --surface: rgba(255, 255, 255, 0.04);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --ink: #f5f5f7;
+  --muted: #98989d;
+  --dim: #6e6e73;
+  --accent: #7dd3fc;
+  --accent-ink: #0b1220;
+  --ok: #6ee7b7;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  width: 100%;
+  height: 100dvh;
+  max-width: 100%;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  color: var(--ink);
   background:
-    radial-gradient(1200px 400px at 50% -10%, rgba(0, 168, 224, 0.08), transparent),
+    radial-gradient(720px 320px at 8% -10%, rgba(125, 211, 252, 0.1), transparent 48%),
+    radial-gradient(520px 280px at 92% 0%, rgba(167, 139, 250, 0.07), transparent 45%),
     var(--bg);
 }
 
-.anim {
-  opacity: 0;
-  transform: translateY(12px);
-  transition: opacity 420ms ease, transform 420ms ease;
-  transition-delay: calc(var(--i, 0) * 70ms);
-}
-
-.page.ready .anim {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.top {
+.topbar {
+  flex: 0 0 auto;
+  height: 52px;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 4px 2px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(9, 9, 11, 0.72);
+  backdrop-filter: blur(14px);
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 
-.logo {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
+.mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
   display: grid;
   place-items: center;
+  font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  background: rgba(0, 168, 224, 0.12);
   color: var(--accent);
-  border: 1px solid rgba(0, 168, 224, 0.28);
+  background: rgba(125, 211, 252, 0.12);
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  flex-shrink: 0;
 }
 
-.brand h1 {
-  margin: 0;
-  font-size: 1.15rem;
-  font-weight: 700;
+.brand-text {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
 }
 
-.brand p {
-  margin: 2px 0 0;
+.brand-text strong {
+  font-size: 0.95rem;
+  letter-spacing: -0.02em;
+}
+
+.brand-text span {
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.doc-name {
-  color: #777;
-  font-size: 0.7rem;
-  letter-spacing: 0.04em;
+.top-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: #d2d2d7;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.pulse.ok {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(110, 231, 183, 0.12);
+}
+
+.pulse.warn {
+  background: var(--warn);
+}
+
+.pulse.load {
+  background: var(--accent);
+  animation: breathe 1.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.main {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+}
+
+.pane {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.left {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.right {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  overflow: hidden;
 }
 
 .slots {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+  flex: 0 0 auto;
 }
 
 .slot {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  border-radius: 14px;
-  background: var(--surface);
-  border: 1px solid var(--line);
   min-width: 0;
 }
 
-.slot.filled {
-  border-color: #3f3f3f;
-}
-
-.slot-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  font-size: 0.85rem;
-}
-
-.icon-btn {
-  border: none;
-  background: rgba(204, 0, 0, 0.15);
-  color: #ff6b6b;
-  border-radius: 8px;
-  padding: 4px 8px;
-  font-size: 0.72rem;
-}
-
-.slot-body {
-  border: none;
-  padding: 0;
-  background: #1a1a1a;
-  border-radius: 10px;
-  overflow: hidden;
-  aspect-ratio: 1.58;
+.slot-hit {
   width: 100%;
+  aspect-ratio: 1.58;
+  border: 1px solid var(--line);
+  background: #0c0c0f;
+  border-radius: 14px;
+  overflow: hidden;
+  padding: 0;
   cursor: pointer;
+  display: block;
+  position: relative;
 }
 
-.slot-body img {
+.slot.filled .slot-hit,
+.slot-hit:hover {
+  border-color: rgba(125, 211, 252, 0.32);
+}
+
+.slot-hit img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: contain;
+  object-position: center;
   display: block;
-  background: #111;
+  background: #0a0a0c;
 }
 
-.empty {
-  width: 100%;
-  height: 100%;
-  min-height: 88px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.empty-icon {
-  font-size: 1.2rem;
-  opacity: 0.8;
-}
-
-.sub {
-  font-size: 0.72rem;
-  color: #666;
-}
-
-.slot-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.slot-index {
+.slot-hit .plus {
   position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  display: none;
+  inset: 0;
+  display: grid;
   place-items: center;
-  font-size: 0.7rem;
-  color: #888;
+}
+
+.plus {
+  color: var(--dim);
+  font-size: 1.5rem;
+  font-weight: 300;
+  line-height: 1;
+}
+
+.slot-tools {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.icon-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(10, 10, 12, 0.72);
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.icon-btn.danger {
+  color: var(--danger);
 }
 
 .hidden {
   display: none;
 }
 
-.panel {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px;
-  border-radius: 14px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-}
-
-.engine-row {
+.field {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
+  flex: 0 0 auto;
 }
 
-.label {
-  font-size: 0.82rem;
-  font-weight: 600;
+.field-label {
+  font-size: 0.78rem;
+  color: var(--muted);
+  flex: 0 0 auto;
 }
 
 .select {
-  flex: 0 0 auto;
-  min-width: 150px;
-  background: var(--surface-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.04)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%98989d' d='M1 1l5 5 5-5'/%3E%3C/svg%3E")
+    no-repeat right 12px center;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 10px;
+  border-radius: 12px;
+  padding: 10px 32px 10px 12px;
+  color: var(--ink);
+  font-size: 0.85rem;
 }
 
 .fold {
   border-top: 1px solid var(--line);
-  padding-top: 4px;
+  flex: 0 0 auto;
 }
 
 .fold-head {
@@ -617,57 +684,69 @@ onMounted(() => {
   border: none;
   padding: 10px 0;
   cursor: pointer;
-  font-weight: 600;
-  font-size: 0.88rem;
-}
-
-.hint {
-  color: var(--muted);
-  font-weight: 500;
-  font-size: 0.72rem;
+  color: inherit;
+  font-weight: 560;
+  font-size: 0.86rem;
 }
 
 .fold-body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
   padding-bottom: 8px;
+  max-height: 36dvh;
+  overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.fold-body::-webkit-scrollbar {
+  width: 0;
+  display: none;
+}
+
+.fold-body .text-input,
+.fold-body .slider {
+  grid-column: 1 / -1;
 }
 
 .check {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 40px;
-  font-size: 0.88rem;
-  color: #ddd;
+  gap: 8px;
+  min-height: 30px;
+  font-size: 0.8rem;
+  color: #e5e5ea;
+  cursor: pointer;
 }
 
 .check input {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   accent-color: var(--accent);
 }
 
 .text-input {
   width: 100%;
-  background: var(--surface-2);
+  background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 10px 12px;
+  padding: 8px 10px;
+  color: var(--ink);
+  font-size: 0.82rem;
 }
 
-.slider-row {
+.slider {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .slider-head {
   display: flex;
   justify-content: space-between;
-  color: #bbb;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
+  color: var(--muted);
 }
 
 input[type='range'] {
@@ -675,180 +754,226 @@ input[type='range'] {
   accent-color: var(--accent);
 }
 
-.preview {
+.muted {
+  color: var(--dim);
+}
+
+.dock {
+  margin-top: auto;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px;
-  border-radius: 14px;
-  background: var(--surface);
-  border: 1px solid var(--line);
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
 }
 
-.preview-head {
+.status {
   display: flex;
   justify-content: space-between;
-  align-items: center;
   gap: 8px;
-  font-size: 0.88rem;
-}
-
-.tag {
-  color: var(--accent);
-  font-size: 0.72rem;
-}
-
-.preview-frame {
-  background: #111;
-  border-radius: 10px;
-  overflow: hidden;
-  min-height: 220px;
-  display: grid;
-  place-items: center;
-}
-
-.preview-frame img {
-  width: 100%;
-  display: block;
-  object-fit: contain;
-  max-height: 70dvh;
-}
-
-.card-previews {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.card-previews figure {
-  margin: 0;
-  background: #1a1a1a;
-  border-radius: 10px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-}
-
-.card-previews img {
-  width: 100%;
-  display: block;
-  aspect-ratio: 1.58;
-  object-fit: contain;
-  background: #111;
-}
-
-.card-previews figcaption {
-  padding: 6px 8px;
-  font-size: 0.72rem;
   color: var(--muted);
-}
-
-.bottom {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 20;
-  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-  background: rgba(22, 22, 22, 0.92);
-  backdrop-filter: blur(12px);
-  border-top: 1px solid #2f2f2f;
+  font-size: 0.74rem;
+  min-height: 1.2em;
 }
 
 .status-line {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 0.75rem;
-  margin-bottom: 8px;
-  min-height: 1em;
-}
-
-.progress {
-  height: 3px;
-  background: #2d2d2d;
-  border-radius: 999px;
+  min-width: 0;
   overflow: hidden;
-  margin-bottom: 8px;
-}
-
-.progress i {
-  display: block;
-  height: 100%;
-  background: linear-gradient(90deg, #00a8e0, #5ad0ff);
-  transition: width 180ms ease;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .error {
-  color: #ff8a8a;
-  background: rgba(204, 0, 0, 0.12);
-  border: 1px solid rgba(204, 0, 0, 0.28);
+  color: #fecaca;
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.22);
   border-radius: 10px;
   padding: 8px 10px;
-  font-size: 0.78rem;
-  margin-bottom: 8px;
+  font-size: 0.74rem;
+  line-height: 1.45;
 }
 
 .actions {
   display: grid;
-  grid-template-columns: 1.2fr 1fr 0.8fr;
+  grid-template-columns: 1.25fr 0.9fr 0.7fr;
   gap: 8px;
 }
 
 .btn {
-  min-height: 46px;
+  min-height: 42px;
   border-radius: 12px;
-  border: 1px solid var(--line);
-  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--ink);
-  font-weight: 600;
-  font-size: 0.9rem;
+  font-weight: 560;
+  font-size: 0.86rem;
   cursor: pointer;
 }
 
 .btn.primary {
-  background: var(--accent);
+  background: linear-gradient(180deg, #b8e6fb, var(--accent));
   border-color: transparent;
-  color: #04202a;
+  color: var(--accent-ink);
+  box-shadow: 0 8px 24px rgba(125, 211, 252, 0.12);
 }
 
-.btn.secondary {
-  min-height: 40px;
-  font-size: 0.82rem;
-  background: #2a2a2a;
-}
-
-.btn.ghost {
+.btn.quiet {
   background: transparent;
 }
 
 .btn:disabled {
-  opacity: 0.45;
+  opacity: 0.38;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 .btn:not(:disabled):active {
-  transform: scale(0.98);
+  transform: scale(0.985);
 }
 
-.modal-mask {
+.preview-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.preview-head h2 {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.badge {
+  font-size: 0.72rem;
+  color: var(--accent);
+  border: 1px solid rgba(125, 211, 252, 0.25);
+  background: rgba(125, 211, 252, 0.08);
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+
+.preview-frame,
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: #101014;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 10px;
+}
+
+.stage img,
+.preview-frame img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  object-position: center;
+  background: #ffffff;
+  border-radius: 2px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.stage-empty {
+  color: var(--dim);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.stage-empty p {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.stage-ring {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: conic-gradient(from 210deg, rgba(125, 211, 252, 0.35), transparent 40%, rgba(255, 255, 255, 0.06));
+  mask: radial-gradient(circle, transparent 42%, #000 43%);
+  -webkit-mask: radial-gradient(circle, transparent 42%, #000 43%);
+}
+
+.card-previews,
+.thumbs {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.thumbs figure {
+  margin: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #0a0a0c;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+}
+
+.thumbs img {
+  width: 100%;
+  height: auto;
+  max-height: 96px;
+  object-fit: contain;
+  object-position: center;
+  display: block;
+  background: #111;
+  border-radius: 4px;
+}
+
+.left,
+.right {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.left::-webkit-scrollbar,
+.right::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.modal-mask,
+.mask {
   position: fixed;
   inset: 0;
   z-index: 100;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.62);
-  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(10px);
   padding: 24px;
 }
 
-.modal-card {
-  width: min(280px, 86vw);
-  border-radius: 16px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
-  padding: 22px 18px 18px;
+.modal {
+  width: min(300px, 86vw);
+  border-radius: 20px;
+  border: 1px solid var(--line-strong);
+  background: rgba(18, 18, 20, 0.92);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+  padding: 24px 18px 18px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -856,13 +981,23 @@ input[type='range'] {
   text-align: center;
 }
 
-.spinner {
-  width: 36px;
-  height: 36px;
+.orb {
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
-  border: 3px solid #333;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  background: radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.2), rgba(125, 211, 252, 0.12) 45%, transparent 70%);
+}
+
+.orb span {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(125, 211, 252, 0.25);
   border-top-color: var(--accent);
-  animation: spin 0.85s linear infinite;
+  animation: spin 0.9s linear infinite;
 }
 
 @keyframes spin {
@@ -873,38 +1008,94 @@ input[type='range'] {
 
 .modal-title {
   font-size: 0.95rem;
-  font-weight: 650;
-  color: var(--ink);
+  font-weight: 600;
 }
 
 .modal-text {
   font-size: 0.78rem;
   color: var(--muted);
-  line-height: 1.45;
-  word-break: break-all;
+  line-height: 1.5;
 }
 
 .modal-pct {
-  font-size: 0.75rem;
   color: var(--accent);
+  font-size: 0.75rem;
 }
 
-.modal-progress {
+.progress,
+.modal-bar {
   width: 100%;
-  margin-bottom: 0;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
 }
 
-@media (max-width: 380px) {
-  .slots {
+.progress i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, rgba(125, 211, 252, 0.4), var(--accent));
+}
+
+@media (min-width: 900px) {
+  .hide-sm {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 899px) {
+  .hide-sm {
+    display: none;
+  }
+
+  .brand-text span {
+    display: none;
+  }
+
+  .main {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  }
+
+  .left {
+    order: 2;
+    border-right: none;
+    border-top: 1px solid var(--line);
+  }
+
+  .right {
+    order: 1;
+    padding-bottom: 8px;
+  }
+
+  .thumbs img {
+    height: 56px;
+  }
+}
+
+@media (max-width: 420px) {
+  .topbar {
+    height: 46px;
+    padding: 0 10px;
+  }
+
+  .left,
+  .right {
+    padding: 10px;
+    gap: 8px;
+  }
+
+  .slots {
+    gap: 8px;
   }
 
   .actions {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1.35fr 1fr 0.75fr;
   }
 
-  .actions .ghost {
-    grid-column: 1 / -1;
+  .btn {
+    min-height: 40px;
+    font-size: 0.8rem;
   }
 }
 </style>

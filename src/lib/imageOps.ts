@@ -219,6 +219,7 @@ export function standardizeSize(src: Raster, aspect: number, width = 1011): Rast
   return resizeRaster(out, w, h)
 }
 
+/** Fit entire source into card slot (letterbox on white) — never crop for display/layout. */
 export function scaleToCard(src: Raster, cardW: number, cardH: number): Raster {
   if (cardW < 1 || cardH < 1) return src
   if (src.width === cardW && src.height === cardH) return src
@@ -226,9 +227,11 @@ export function scaleToCard(src: Raster, cardW: number, cardH: number): Raster {
   canvas.width = cardW
   canvas.height = cardH
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, cardW, cardH)
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = 'high'
-  const scale = Math.max(cardW / src.width, cardH / src.height)
+  const scale = Math.min(cardW / src.width, cardH / src.height)
   const dw = src.width * scale
   const dh = src.height * scale
   ctx.drawImage(rasterToCanvas(src), (cardW - dw) / 2, (cardH - dh) / 2, dw, dh)

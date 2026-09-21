@@ -8,6 +8,8 @@ import { canvasToPdfBlob } from './pdf'
 
 export interface GenerateResult {
   sheet: HTMLCanvasElement
+  /** Downscaled full-page preview (data URL), for UI display */
+  sheetPreviewUrl: string
   frontPreview: string
   backPreview: string
   pdfBlob: Blob
@@ -24,8 +26,26 @@ function canvasPreview(canvas: HTMLCanvasElement, maxW = 720): string {
   c.width = Math.round(canvas.width * scale)
   c.height = Math.round(canvas.height * scale)
   const ctx = c.getContext('2d')!
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, c.width, c.height)
+  ctx.imageSmoothingQuality = 'high'
   ctx.drawImage(canvas, 0, 0, c.width, c.height)
   return c.toDataURL('image/jpeg', 0.85)
+}
+
+/** Full A4 for PDF; preview uses a downscaled data URL so the whole page is visible. */
+function sheetPreviewUrl(canvas: HTMLCanvasElement): string {
+  const maxH = 1400
+  const scale = Math.min(1, maxH / canvas.height)
+  const c = document.createElement('canvas')
+  c.width = Math.max(1, Math.round(canvas.width * scale))
+  c.height = Math.max(1, Math.round(canvas.height * scale))
+  const ctx = c.getContext('2d')!
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, c.width, c.height)
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(canvas, 0, 0, c.width, c.height)
+  return c.toDataURL('image/jpeg', 0.88)
 }
 
 export async function generateIDCardPdf(
@@ -85,6 +105,7 @@ export async function generateIDCardPdf(
   onProgress('完成', 1)
   return {
     sheet,
+    sheetPreviewUrl: sheetPreviewUrl(sheet),
     frontPreview: canvasPreview(frontPreviewCanvas(front)),
     backPreview: canvasPreview(frontPreviewCanvas(back)),
     pdfBlob,

@@ -19,7 +19,7 @@ const browser = await chromium.launch({
   headless: true,
   args: ['--no-sandbox', '--disable-gpu'],
 })
-const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
+const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
 page.on('pageerror', (err) => console.error('PAGEERROR', err.message))
 page.on('console', (msg) => {
   if (msg.type() === 'error') console.error('CONSOLE', msg.text())
@@ -32,28 +32,25 @@ await page.waitForTimeout(800)
 const title = await page.title()
 console.log('title:', title)
 const body = await page.locator('body').innerText()
-if (!body.includes('IDA4 Web') && !body.includes('身份证')) {
+if (!body.includes('身份证') && !body.includes('IDA4')) {
   console.error('UI text missing. body=', body.slice(0, 200))
 }
 
-// model reachable
 const modelRes = await page.request.get(`${url.replace(/\/$/, '')}/models/cv_resnet18_card_correction.onnx`)
 console.log('model status', modelRes.status(), 'len', (await modelRes.body()).length)
 const ortWasm = await page.request.get(`${url.replace(/\/$/, '')}/ort/ort-wasm-simd-threaded.wasm`)
 console.log('ort wasm status', ortWasm.status(), 'len', (await ortWasm.body()).length)
 
-// wait for model preload modal to finish
 const modelDeadline = Date.now() + 120000
 while (Date.now() < modelDeadline) {
   const mask = await page.locator('.modal-mask').count()
-  const btn = page.getByRole('button', { name: /生成|模型加载中/ })
+  const btn = page.getByRole('button', { name: /^生成$/ })
   const label = await btn.first().innerText().catch(() => '')
-  if (mask === 0 && /生成/.test(label)) break
+  if (mask === 0 && label === '生成') break
   await page.waitForTimeout(400)
 }
 console.log('model ready, proceed generate')
 
-// upload front/back via hidden gallery inputs
 const galleryInputs = page.locator('input[type=file]:not([capture])')
 const count = await galleryInputs.count()
 console.log('gallery inputs', count)
@@ -62,18 +59,16 @@ await galleryInputs.nth(0).setInputFiles(front)
 await galleryInputs.nth(1).setInputFiles(back)
 await page.waitForTimeout(500)
 
-const previews = await page.locator('.slot-body img').count()
+const previews = await page.locator('.slot-hit img').count()
 console.log('slot previews', previews)
 
-// generate
-await page.getByRole('button', { name: '生成' }).click()
+await page.getByRole('button', { name: /^生成$/ }).click()
 console.log('clicked generate, waiting…')
 
-// wait up to 180s for completion
 const start = Date.now()
 let ok = false
 while (Date.now() - start < 180000) {
-  const status = await page.locator('.status-line').innerText()
+  const status = await page.locator('.status-line').first().innerText()
   const sheet = await page.locator('.preview-frame img').count()
   if (sheet > 0 && /完成|生成完成/.test(status)) {
     ok = true
@@ -92,12 +87,12 @@ while (Date.now() - start < 180000) {
   await page.waitForTimeout(400)
 }
 
-const finalStatus = await page.locator('.status-line').innerText().catch(() => '')
+const finalStatus = await page.locator('.status-line').first().innerText().catch(() => '')
 const sheetCount = await page.locator('.preview-frame img').count()
-const cardCount = await page.locator('.card-previews img').count()
+const cardCount = await page.locator('.thumbs img, .card-previews img').count()
 const errorText = await page.locator('.error').innerText().catch(() => '')
 console.log({ ok, finalStatus, sheetCount, cardCount, errorText })
-await page.screenshot({ path: path.join(project, 'testdata/smoke.png'), fullPage: true })
+await page.screenshot({ path: path.join(project, 'testdata/smoke.png'), fullPage: false })
 await browser.close()
 if (!ok || sheetCount < 1) process.exit(1)
 console.log('SMOKE OK')

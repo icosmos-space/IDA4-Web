@@ -76,7 +76,7 @@ export function defaultOptions(): GenerateOptions {
   return {
     dpi: 300,
     marginMM: 20,
-    gapMM: 25,
+    gapMM: 12,
     enhance: true,
     allowFallback: true,
     randomTilt: true,

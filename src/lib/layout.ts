@@ -5,7 +5,6 @@ import {
   createRaster,
   grayscale,
   rasterToCanvas,
-  rotateBy,
   scaleToCard,
 } from './imageOps'
 
@@ -20,24 +19,22 @@ function styleCard(src: Raster, cardW: number, cardH: number, opts: GenerateOpti
   return out
 }
 
-function drawCard(
-  canvas: HTMLCanvasElement,
-  srcCanvas: HTMLCanvasElement,
+/** Draw a card into an exact slot; rotation does not change slot size. */
+function drawCardSlot(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLCanvasElement,
   slotX: number,
   slotY: number,
   cardW: number,
   cardH: number,
-  angle = 0,
+  angleDeg = 0,
   offsetX = 0,
   offsetY = 0,
 ): void {
-  const ctx = canvas.getContext('2d')!
   ctx.save()
-  const cx = slotX + cardW / 2 + offsetX
-  const cy = slotY + cardH / 2 + offsetY
-  ctx.translate(cx, cy)
-  if (angle) ctx.rotate((angle * Math.PI) / 180)
-  ctx.drawImage(srcCanvas, -srcCanvas.width / 2, -srcCanvas.height / 2)
+  ctx.translate(slotX + cardW / 2 + offsetX, slotY + cardH / 2 + offsetY)
+  if (angleDeg) ctx.rotate((angleDeg * Math.PI) / 180)
+  ctx.drawImage(img, -cardW / 2, -cardH / 2, cardW, cardH)
   ctx.restore()
 }
 
@@ -51,30 +48,27 @@ export function applyWatermark(srcCanvas: HTMLCanvasElement, style: Partial<Wate
   const letterSpacing = s.letterSpacing
 
   const stamp = document.createElement('canvas')
-  const sctx = stamp.getContext('2d')!
-  sctx.font = `500 ${fontSize}px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`
+  const measure = stamp.getContext('2d')!
+  measure.font = `500 ${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`
   const chars = Array.from(text)
-  const widths = chars.map((c) => sctx.measureText(c).width)
+  const widths = chars.map((c) => measure.measureText(c).width)
   const total =
-    widths.reduce((a, b) => a + b, 0) +
-    (chars.length > 1 ? letterSpacing * (chars.length - 1) : 0)
+    widths.reduce((a, b) => a + b, 0) + (chars.length > 1 ? letterSpacing * (chars.length - 1) : 0)
   const height = Math.ceil(fontSize * 1.4)
   const pad = 8
   stamp.width = Math.max(1, Math.ceil(total + pad * 2))
   stamp.height = height + pad * 2
-  const sctx2 = stamp.getContext('2d')!
-  sctx2.font = `500 ${fontSize}px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`
-  sctx2.fillStyle = `rgba(120,120,120,${opacity / 255})`
-  sctx2.textBaseline = 'top'
+  const sctx = stamp.getContext('2d')!
+  sctx.font = measure.font
+  sctx.fillStyle = `rgba(120,120,120,${opacity / 255})`
+  sctx.textBaseline = 'top'
   let x = pad
-  const y = pad
   chars.forEach((c, i) => {
-    sctx2.fillText(c, x, y)
+    sctx.fillText(c, x, pad)
     x += widths[i]
     if (i < chars.length - 1) x += letterSpacing
   })
 
-  // rotate stamp
   const rotated = document.createElement('canvas')
   const rad = (angle * Math.PI) / 180
   const cos = Math.abs(Math.cos(rad))
@@ -105,6 +99,10 @@ export function applyWatermark(srcCanvas: HTMLCanvasElement, style: Partial<Wate
   return out
 }
 
+/**
+ * A4 vertical: front on top, back below, both in fixed card slots.
+ * Tilt/offset only transform drawing — slot geometry stays cardW × cardH.
+ */
 export function renderA4Sheet(
   front: Raster,
   back: Raster,
@@ -125,50 +123,29 @@ export function renderA4Sheet(
   ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, pageW, pageH)
 
-  const marginPx = mmToPx(opts.marginMM, dpi)
-  const gapPx = mmToPx(opts.gapMM, dpi)
+  const marginPx = mmToPx(opts.marginMM > 0 ? opts.marginMM : 20, dpi)
+  const gapPx = mmToPx(opts.gapMM > 0 ? opts.gapMM : 12, dpi)
   const centerX = Math.floor((pageW - cardW) / 2)
 
-  const frontStyled = styleCard(front, cardW, cardH, opts)
-  const backStyled = styleCard(back, cardW, cardH, opts)
-  const frontCanvas = rasterToCanvas(frontStyled)
-  const backCanvas = rasterToCanvas(backStyled)
+  const frontCanvas = rasterToCanvas(styleCard(front, cardW, cardH, opts))
+  const backCanvas = rasterToCanvas(styleCard(back, cardW, cardH, opts))
 
   const totalH = cardH * 2 + gapPx
   let startY = Math.floor((pageH - totalH) / 2)
   if (startY < marginPx) startY = marginPx
+
+  const backY = startY + cardH + gapPx
 
   if (opts.randomTilt) {
     const maxTilt = opts.maxTiltDegrees > 0 ? opts.maxTiltDegrees : 3
     const maxOffMM = opts.maxOffsetMM > 0 ? opts.maxOffsetMM : 2.5
     const maxOff = mmToPx(maxOffMM, dpi)
     const rand = (m: number) => (Math.random() * 2 - 1) * m
-    drawCard(
-      canvas,
-      rasterToCanvas(rotateBy(frontStyled, rand(maxTilt))),
-      centerX,
-      startY,
-      cardW,
-      cardH,
-      0,
-      Math.round(rand(maxOff)),
-      Math.round(rand(maxOff)),
-    )
-    // rotateBy already applied angle; draw without extra rotate
-    drawCard(
-      canvas,
-      rasterToCanvas(rotateBy(backStyled, rand(maxTilt))),
-      centerX,
-      startY + cardH + gapPx,
-      cardW,
-      cardH,
-      0,
-      Math.round(rand(maxOff)),
-      Math.round(rand(maxOff)),
-    )
+    drawCardSlot(ctx, frontCanvas, centerX, startY, cardW, cardH, rand(maxTilt), Math.round(rand(maxOff)), Math.round(rand(maxOff)))
+    drawCardSlot(ctx, backCanvas, centerX, backY, cardW, cardH, rand(maxTilt), Math.round(rand(maxOff)), Math.round(rand(maxOff)))
   } else {
-    drawCard(canvas, frontCanvas, centerX, startY, cardW, cardH)
-    drawCard(canvas, backCanvas, centerX, startY + cardH + gapPx, cardW, cardH)
+    drawCardSlot(ctx, frontCanvas, centerX, startY, cardW, cardH)
+    drawCardSlot(ctx, backCanvas, centerX, backY, cardW, cardH)
   }
 
   if (opts.watermarkEnabled) {
