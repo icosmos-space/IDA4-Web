@@ -1,0 +1,25 @@
+{
+  "name": "ida4-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "身份证 A4 复印件手机 Web 端（浏览器 ONNX 矫正）",
+  "scripts": {
+    "dev": "vite",
+    "build": "node node_modules/vue-tsc/bin/vue-tsc.js --noEmit && node node_modules/vite/bin/vite.js build && node scripts/copy-assets.mjs",
+    "preview": "node node_modules/vite/bin/vite.js preview",
+    "copy-assets": "node scripts/copy-assets.mjs",
+    "typecheck": "node node_modules/vue-tsc/bin/vue-tsc.js --noEmit"
+  },
+  "dependencies": {
+    "jspdf": "^2.5.2",
+    "onnxruntime-web": "^1.20.1",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vue-tsc": "^2.2.0"
+  }
+}
