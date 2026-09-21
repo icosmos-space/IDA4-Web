@@ -5,7 +5,7 @@ import { defaultOptions } from '../lib/types'
 import { DOCUMENT_NAME, effectsHint, formatDuration, isImageFile, readFilePreview } from '../lib/utils'
 import { generateIDCardPdf } from '../lib/generate'
 import { downloadBlob, tryShareFiles } from '../lib/pdf'
-import { initOrt } from '../lib/ort'
+import { loadCardCorrectionSession } from '../lib/ort'
 import type { SideState } from '../lib/utils'
 
 const mounted = ref(false)
@@ -20,6 +20,22 @@ const backPreview = ref('')
 const pdfBlob = ref<Blob | null>(null)
 const engineUsed = ref('')
 const lastMs = ref(0)
+
+const modelLoading = ref(true)
+const modelReady = ref(false)
+const modelError = ref('')
+
+const modalVisible = computed(() => modelLoading.value || busy.value)
+const modalTitle = computed(() => {
+  if (modelLoading.value) return '正在加载模型'
+  return busy.value ? '正在生成' : ''
+})
+const modalText = computed(() => {
+  if (modelLoading.value) {
+    return status.value || '首次加载约 40MB，请稍候…'
+  }
+  return status.value || '处理中…'
+})
 
 const cameraInputs = {
   front: ref<HTMLInputElement | null>(null),
@@ -43,7 +59,11 @@ const readyCount = computed(() => {
   return n
 })
 
-const canGenerate = computed(() => readyCount.value === 2 && !busy.value)
+const canGenerate = computed(() => {
+  if (readyCount.value !== 2 || busy.value || modelLoading.value) return false
+  if (data.opts.engine === 'card_correction') return modelReady.value
+  return true
+})
 
 const engineLabel = computed(() => (data.opts.engine === 'card_correction' ? '票证矫正（ONNX）' : '纯边缘检测'))
 
@@ -166,12 +186,30 @@ function printPdf() {
   setTimeout(() => URL.revokeObjectURL(url), 60000)
 }
 
+async function preloadModel() {
+  modelLoading.value = true
+  modelReady.value = false
+  modelError.value = ''
+  status.value = '正在下载并初始化 ONNX 模型…'
+  try {
+    await loadCardCorrectionSession()
+    modelReady.value = true
+    status.value = '模型已就绪'
+  } catch (err) {
+    modelError.value = err instanceof Error ? err.message : String(err)
+    modelReady.value = false
+    error.value = `模型加载失败：${modelError.value}`
+    status.value = '模型加载失败，可改用边缘检测'
+  } finally {
+    modelLoading.value = false
+  }
+}
+
 onMounted(() => {
   requestAnimationFrame(() => {
     mounted.value = true
   })
-  // Prefetch ORT wasm path existence silently
-  void initOrt()
+  void preloadModel()
 })
 </script>
 
@@ -314,19 +352,43 @@ onMounted(() => {
 
     <footer class="bottom anim" style="--i: 4">
       <div class="status-line">
-        <span>{{ status || `已准备 ${readyCount}/2 · 引擎 ${engineLabel}` }}</span>
-        <span v-if="busy" class="mono">{{ Math.round(progress * 100) }}%</span>
+        <span>
+          {{
+            status ||
+            (modelLoading
+              ? '正在加载模型…'
+              : `已准备 ${readyCount}/2 · 引擎 ${engineLabel}${data.opts.engine === 'card_correction' && !modelReady ? ' · 模型未就绪' : ''}`)
+          }}
+        </span>
+        <span v-if="busy || modelLoading" class="mono">
+          {{ modelLoading && !busy ? '' : `${Math.round(progress * 100)}%` }}
+        </span>
       </div>
-      <div v-if="busy" class="progress"><i :style="{ width: `${Math.round(progress * 100)}%` }" /></div>
+      <div v-if="busy || modelLoading" class="progress">
+        <i :style="{ width: modelLoading && !busy ? '100%' : `${Math.round(progress * 100)}%` }" />
+      </div>
       <div v-if="error" class="error">{{ error }}</div>
       <div class="actions">
         <button type="button" class="btn primary" :disabled="!canGenerate" @click="generate">
-          {{ busy ? '处理中…' : '生成' }}
+          {{ busy ? '处理中…' : modelLoading ? '模型加载中…' : '生成' }}
         </button>
         <button type="button" class="btn" :disabled="!pdfBlob" @click="download">下载 / 分享</button>
         <button type="button" class="btn ghost" :disabled="!pdfBlob" @click="printPdf">打印</button>
       </div>
     </footer>
+
+    <!-- 居中模态 loading：打开页面加载模型 / 生成中 -->
+    <div v-if="modalVisible" class="modal-mask" role="status" aria-live="polite">
+      <div class="modal-card">
+        <div class="spinner" aria-hidden="true" />
+        <div class="modal-title">{{ modalTitle }}</div>
+        <div class="modal-text">{{ modalText }}</div>
+        <div v-if="busy" class="modal-pct mono">{{ Math.round(progress * 100) }}%</div>
+        <div v-if="busy" class="progress modal-progress">
+          <i :style="{ width: `${Math.round(progress * 100)}%` }" />
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -767,6 +829,69 @@ input[type='range'] {
 
 .btn:not(:disabled):active {
   transform: scale(0.98);
+}
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(4px);
+  padding: 24px;
+}
+
+.modal-card {
+  width: min(280px, 86vw);
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  padding: 22px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 3px solid #333;
+  border-top-color: var(--accent);
+  animation: spin 0.85s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.modal-title {
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.modal-text {
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.modal-pct {
+  font-size: 0.75rem;
+  color: var(--accent);
+}
+
+.modal-progress {
+  width: 100%;
+  margin-bottom: 0;
 }
 
 @media (max-width: 380px) {

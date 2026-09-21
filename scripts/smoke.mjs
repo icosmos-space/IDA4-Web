@@ -42,6 +42,17 @@ console.log('model status', modelRes.status(), 'len', (await modelRes.body()).le
 const ortWasm = await page.request.get(`${url.replace(/\/$/, '')}/ort/ort-wasm-simd-threaded.wasm`)
 console.log('ort wasm status', ortWasm.status(), 'len', (await ortWasm.body()).length)
 
+// wait for model preload modal to finish
+const modelDeadline = Date.now() + 120000
+while (Date.now() < modelDeadline) {
+  const mask = await page.locator('.modal-mask').count()
+  const btn = page.getByRole('button', { name: /生成|模型加载中/ })
+  const label = await btn.first().innerText().catch(() => '')
+  if (mask === 0 && /生成/.test(label)) break
+  await page.waitForTimeout(400)
+}
+console.log('model ready, proceed generate')
+
 // upload front/back via hidden gallery inputs
 const galleryInputs = page.locator('input[type=file]:not([capture])')
 const count = await galleryInputs.count()
