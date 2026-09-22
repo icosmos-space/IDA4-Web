@@ -101,7 +101,7 @@ export function defaultWatermark(): WatermarkStyle {
     angleDegrees: -32,
     letterSpacing: 10,
     lineSpacing: 96,
-    opacity: 56,
+    opacity: 72,
   }
 }
 

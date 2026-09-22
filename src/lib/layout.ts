@@ -43,24 +43,28 @@ export function applyWatermark(srcCanvas: HTMLCanvasElement, style: Partial<Wate
   const text = (s.text || defaultWatermark().text).trim()
   const fontSize = s.fontSizePx > 0 ? s.fontSizePx : 36
   const lineSpacing = s.lineSpacing > 0 ? s.lineSpacing : 96
-  const opacity = s.opacity > 0 ? s.opacity : 56
+  const opacity = s.opacity > 0 ? s.opacity : 72
   const angle = s.angleDegrees
   const letterSpacing = s.letterSpacing
+  // Keep font string — canvas width/height assignment resets ctx state.
+  const font = `500 ${fontSize}px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`
 
-  const stamp = document.createElement('canvas')
-  const measure = stamp.getContext('2d')!
-  measure.font = `500 ${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`
   const chars = Array.from(text)
+  const measureCanvas = document.createElement('canvas')
+  const measure = measureCanvas.getContext('2d')!
+  measure.font = font
   const widths = chars.map((c) => measure.measureText(c).width)
   const total =
     widths.reduce((a, b) => a + b, 0) + (chars.length > 1 ? letterSpacing * (chars.length - 1) : 0)
-  const height = Math.ceil(fontSize * 1.4)
-  const pad = 8
-  stamp.width = Math.max(1, Math.ceil(total + pad * 2))
-  stamp.height = height + pad * 2
+  const height = Math.ceil(fontSize * 1.45)
+  const pad = 10
+
+  const stamp = document.createElement('canvas')
+  stamp.width = Math.max(8, Math.ceil(total + pad * 2))
+  stamp.height = Math.max(8, height + pad * 2)
   const sctx = stamp.getContext('2d')!
-  sctx.font = measure.font
-  sctx.fillStyle = `rgba(120,120,120,${opacity / 255})`
+  sctx.font = font
+  sctx.fillStyle = `rgba(90, 90, 95, ${opacity / 255})`
   sctx.textBaseline = 'top'
   let x = pad
   chars.forEach((c, i) => {
@@ -85,9 +89,10 @@ export function applyWatermark(srcCanvas: HTMLCanvasElement, style: Partial<Wate
   out.height = srcCanvas.height
   const octx = out.getContext('2d')!
   octx.drawImage(srcCanvas, 0, 0)
+  octx.globalAlpha = 1
 
-  const stepX = Math.max(48, rotated.width + Math.max(24, letterSpacing * 4))
-  const stepY = Math.max(48, rotated.height + lineSpacing)
+  const stepX = Math.max(64, rotated.width + Math.max(32, letterSpacing * 4))
+  const stepY = Math.max(64, rotated.height + lineSpacing)
   let row = 0
   for (let y = -rotated.height; y < out.height + rotated.height; y += stepY) {
     const offsetX = row % 2 === 1 ? stepX / 2 : 0
@@ -155,7 +160,7 @@ export function renderA4Sheet(
       angleDegrees: opts.watermarkAngle,
       letterSpacing: opts.watermarkLetterSpacing * (dpi / 300),
       lineSpacing: opts.watermarkLineSpacing * (dpi / 300),
-      opacity: 56,
+      opacity: 72,
     })
   }
   return canvas
