@@ -243,6 +243,7 @@ onMounted(() => {
 
     <div class="main">
       <aside class="pane left">
+        <div class="left-scroll">
         <div class="slots">
           <article
             v-for="side in (['front', 'back'] as Side[])"
@@ -339,6 +340,9 @@ onMounted(() => {
           </div>
         </div>
 
+        </div>
+        <!-- /left-scroll -->
+
         <div class="dock">
           <div class="status">
             <span class="status-line">
@@ -405,6 +409,7 @@ onMounted(() => {
   --warn: #fbbf24;
   --danger: #f87171;
   width: 100%;
+  height: 100vh;
   height: 100dvh;
   max-width: 100%;
   overflow: hidden;
@@ -542,11 +547,32 @@ onMounted(() => {
 .left {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px;
+  gap: 0;
+  padding: 0;
   border-right: 1px solid var(--line);
   overflow: hidden;
   background: rgba(255, 255, 255, 0.012);
+}
+
+.left-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 14px 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.left-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .right {
@@ -694,15 +720,6 @@ onMounted(() => {
   grid-template-columns: 1fr 1fr;
   gap: 4px 10px;
   padding-bottom: 8px;
-  max-height: 36dvh;
-  overflow: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.fold-body::-webkit-scrollbar {
-  width: 0;
-  display: none;
 }
 
 .fold-body .text-input,
@@ -759,13 +776,16 @@ input[type='range'] {
 }
 
 .dock {
-  margin-top: auto;
+  margin-top: 0;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-top: 8px;
+  padding: 10px 14px 12px;
   border-top: 1px solid var(--line);
+  background: rgba(12, 12, 16, 0.92);
+  backdrop-filter: blur(10px);
+  padding-bottom: calc(12px + env(safe-area-inset-bottom));
 }
 
 .status {
@@ -1052,9 +1072,14 @@ input[type='range'] {
     display: none;
   }
 
+  .topbar {
+    height: 44px;
+    flex: 0 0 44px;
+  }
+
   .main {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    grid-template-rows: minmax(140px, 38%) minmax(0, 62%);
   }
 
   .left {
@@ -1063,13 +1088,36 @@ input[type='range'] {
     border-top: 1px solid var(--line);
   }
 
+  .left-scroll {
+    padding: 10px 10px 6px;
+    gap: 8px;
+  }
+
   .right {
     order: 1;
-    padding-bottom: 8px;
+    padding: 8px 10px 6px;
+  }
+
+  .slots {
+    gap: 8px;
   }
 
   .thumbs img {
     height: 56px;
+  }
+
+  .check {
+    min-height: 36px;
+    font-size: 0.84rem;
+  }
+
+  .fold-head {
+    padding: 12px 0;
+    min-height: 44px;
+  }
+
+  .btn {
+    min-height: 44px;
   }
 }
 
